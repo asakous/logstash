@@ -1,0 +1,215 @@
+	input {
+
+	  file {
+		type => "apache-access"
+		path => "/var/log/httpd/access_log"
+	  }
+
+	  file {
+		type => "apache-error"
+		path => "/var/log/httpd/*.error.log"
+	  }
+
+		file {
+			path => "/usr/local/tomcat/logs/localhost_access_log.*.txt"
+			type => 'tomcat-access-log'
+
+		}
+
+	   file {
+			path => "/usr/local/tomcat/logs/catalina.*.log"
+			type => 'tomcat-catania'
+
+		}
+
+	   file {
+		type => "mysql-slow"
+		path => "/var/lib/mysql/mysql-slow.log"
+		codec => multiline {
+		  pattern => "^# User@Host:"
+		  negate => true
+		  what => previous
+		}
+	  }
+
+	  file {
+		type => "syslog"
+		path => [ "/var/log/messages"]
+	  }
+
+	   file {
+			type => "linux-sshd"
+			path => [ "/var/log/secure" ]
+		}
+	  
+	}
+ 
+	filter {
+
+		if [type] == "apache-access" {
+		
+		  grok {
+			match => { "message" => "%{COMBINEDAPACHELOG}" }
+		  }
+		}  
+	 
+		  date {
+			match => [ "timestamp" , "dd/MMM/yyyy:HH:mm:ss Z" ]
+		  }
+
+		if [type] == "tomcat-access-log" {
+			
+		grok {
+
+			match => [ "message" , "%{IPORHOST:client} %{DATA} %{DATA:user} \[%{DATA:logtimestamp} %{ISO8601_TIMEZONE:timezone}\] \"%{WORD:method} %{URIPATH:uri_path}(%{URIPARAM:params}|) %{DATA:protocol}\" %{NUMBER:code} (%{NUMBER:bytes}|%{DATA})" ]
+			}
+		}
+
+		if [type] == "apache-error" {
+
+			grok {
+			patterns_dir => [ "/etc/logstash/patterns.d" ]
+			  match => [ "message", "%{APACHE_ERROR_LOG}" ]
+			}
+
+			if !("_grokparsefailure" in [tags]) {
+
+			  mutate {
+				remove_field => [ "message" ]
+				add_field =>  ["timestamp_submitted", "%{@timestamp}"]
+			  }
+
+			  date {
+				# Try to pull the timestamp from the 'timestamp' field (parsed above with
+				# grok). The apache time format looks like: "18/Aug/2011:05:44:34 -0700"
+				#                        Sat Feb 08 06:31:09 2014
+				match => [ "timestamp", "EEE MMM dd HH:mm:ss yyyy" ]
+				remove_field => [ "timestamp" ]
+			  }
+
+			  geoip {
+				source => "clientip"
+			  }
+			}
+		  }
+
+	  
+	  
+	  
+	  
+	  
+		   if [type] == "tomcat-catania" {
+				multiline {
+				patterns_dir => "/usr/local/logstash/patterns"
+				pattern => "(^%{TOMCAT_DATESTAMP})|(^%{CATALINA_DATESTAMP})"
+				negate => true
+				what => "previous"
+				}
+				if "_grokparsefailure" in [tags] {
+					drop { }
+				}
+			grok {
+				patterns_dir => "/usr/local/logstash/patterns"
+				match => [ "message", "%{TOMCATLOG}", "message", "%{CATALINALOG}" ]
+			}
+				date {
+					match => [ "timestamp", "yyyy-MM-dd HH:mm:ss,SSS Z", "MMM dd, yyyy HH:mm:ss a" ]
+				}
+			}
+	 
+
+		if [type] == "mysql-slow" {  
+
+
+		grok {
+			match => { "message" => "SELECT SLEEP" }
+			drop_if_match => true # appears ineffective, thus tag and conditional
+			add_tag => [ "sleep_drop" ]
+			tag_on_failure => [] # prevent default _grokparsefailure tag on real records
+		  }
+		  if "sleep_drop" in [tags] {
+			drop {}
+		  }
+
+
+		  grok {
+			match => [ "message", "^# User@Host: %{USER:user}(?:\[[^\]]+\])?\s+@\s+%{HOST:host}?\s+\[%{IP:ip}?\]" ]
+		  }
+
+		  grok {
+			match => [ "message", "^# Query_time: %{NUMBER:duration:float}\s+Lock_time: %{NUMBER:lock_wait:float} Rows_sent: %{NUMBER:results:int} \s*Rows_examined: %{NUMBER:scanned:int}"]
+		  }
+
+		  grok {
+			match => [ "message", "^SET timestamp=%{NUMBER:timestamp};" ]
+		  }
+
+		  date {
+			match => [ "timestamp", "UNIX" ]
+		  }
+
+		  mutate {
+			remove_field => "timestamp"
+		  }
+
+
+
+		} 
+	  
+	   	if [type] == "syslog" {
+			
+			  
+			grok {
+			  patterns_dir => [ "/usr/local/logstash/patterns" ]
+			  match => [ "message", "%{SYSLOGPATTERN}" ]
+			  add_field => [ "received_at", "%{@timestamp}" ]
+			  add_field => [ "received_from", "%{@source_host}" ]
+			}
+			
+			
+			
+		}
+		
+		if [type] == "linux-sshd" {
+		
+			#if [file] == "/var/log/auth.log" {
+
+			#if [message] =~ /pam_unix\(sudo:session\):/ or [message] =~ /sudo.*nagios.*\/usr\/lib\/nagios\/plugins\/check_/ or [message] =~ /sudo.*nagios.*\/usr\/sbin\/crm_mon -s/ or [message] =~ /sudo.*nagios.*\/sbin\/ip6tables-save/ 	{
+			#		drop { }
+			#	}
+
+			#}
+			
+			    #add_tag => ["to_graphite_count"]
+				#remove_tag => "_grokparsefailure"
+	
+			grok {
+			  match => [ "message", "%{SYSLOGTIMESTAMP:timestamp} %{HOSTNAME:host_target} sshd\[%{BASE10NUM}\]: Failed password for invalid user %{USERNAME:username} from %{IP:src_ip} port %{BASE10NUM:port} ssh2" ]
+			  add_tag => ["ssh_brute_force_attack"]
+			  remove_tag => ["_grokparsefailure"]
+			}
+			grok {
+			  match => [ "message", "%{SYSLOGTIMESTAMP:timestamp} %{HOSTNAME:host_target} sudo: pam_unix\(sudo:auth\): authentication failure; logname=%{USERNAME:logname} uid=%{BASE10NUM:uid} euid=%{BASE10NUM:euid} tty=%{TTY:tty} ruser=%{USERNAME:ruser} rhost=(?:%{HOSTNAME:remote_host}|\s*) user=%{USERNAME:user}" ]
+			  add_tag => ["sudo_auth_failure"]
+			  remove_tag => ["_grokparsefailure"]
+			}
+			grok {
+			  match => [ "message", "%{SYSLOGTIMESTAMP:timestamp} %{HOSTNAME:host_target} sshd\[%{BASE10NUM}\]: Failed password for %{USERNAME:username} from %{IP:src_ip} port %{BASE10NUM:port} ssh2" ]
+			  add_tag => ["ssh_failed_login"]
+			  remove_tag => ["_grokparsefailure"]
+			}
+
+			grok {
+			  match => [ "message", "%{SYSLOGTIMESTAMP:timestamp} %{HOSTNAME:host_target} sshd\[%{BASE10NUM}\]: Accepted password for %{USERNAME:username} from %{IP:src_ip} port %{BASE10NUM:port} ssh2" ]
+			  add_tag => ["ssh_sucessful_login"]
+			  remove_tag => ["_grokparsefailure"]
+			}
+		
+		
+		
+		}
+	}
+ 
+	output {
+	  redis { host => "172.16.50.55" data_type => "list" key => "logstash" }
+	}
